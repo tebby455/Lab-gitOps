@@ -1,0 +1,131 @@
+image: jok3rbrvt/go-build:1.18.5-alpine3.15
+services:
+  - docker:20.10.14-dind-alpine3.15
+.go-cache:
+    variables:
+        GOPATH: ${CI_PROJECT_DIR}/.go
+    cache:
+      paths:
+        - .go/pkg/mod/
+variables:
+  BUILD_IMAGE: $CI_REGISTRY_IMAGE/stag:${CI_COMMIT_SHORT_SHA}
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+  BUILD_IMAGE_PROD: $CI_REGISTRY_IMAGE/release:${CI_COMMIT_TAG}
+  BUILD_IMAGE_STAG: $CI_REGISTRY_IMAGE/dev:${CI_COMMIT_SHORT_SHA}
+  APP_VERSION_STAG: stag-${CI_COMMIT_SHORT_SHA}
+  APP_VERSION_PROD: prod-${CI_COMMIT_TAG}
+  TAG_IMAGE: ${CI_REGISTRY_IMAGE}:${CI_COMMIT_TAG}
+
+stages:
+  - compile
+  - build_staging
+  - update_manifest_staging
+  - build_production
+  - alert_deploy
+
+combine:
+  tags:
+    - dcna-app-builder
+  image: jok3rbrvt/go-build:1.18.5-alpine3.15
+  stage: compile
+  extends: .go-cache
+  script:
+    - make
+  artifacts:
+      paths:
+        - ${GOPATH}/bin/application
+  only:
+    variables:
+      - $CI_COMMIT_MESSAGE =~ /^\[cicd\]/ || $RUN_PIPELINE
+
+build_staging:build_image:
+  image: docker:20.10.17-git
+  stage: build_staging
+  variables:
+    GOPATH: ${CI_PROJECT_DIR}/.go
+  tags:
+    - dcna-app-builder
+  before_script:
+    - docker login ${CI_REGISTRY} -u ${CI_REGISTRY_USER} -p ${CI_REGISTRY_PASSWORD}
+    - mkdir bin
+    - cp ${GOPATH}/bin/application bin/application
+  script:
+    - ls -alh
+    - docker build --build-arg PATH_BIN=./bin/application -t ${BUILD_IMAGE} .
+    - docker push ${BUILD_IMAGE}
+  after_script:
+    - docker logout ${CI_REGISTRY}
+  only:
+    refs:
+      - dev
+    variables:
+      - $CI_COMMIT_MESSAGE =~ /^\[cicd\]/ || $RUN_PIPELINE
+  
+alert_build_image:failure:
+  stage: alert_deploy
+  needs: ["build_staging:build_image"]
+  image: nyurik/alpine-python3-requests
+  tags:
+    - dcna-app-builder
+  script:
+    - python3 devops/noti_failed.py
+  only:
+    refs:
+    - dev
+    variables:
+    - $CI_COMMIT_MESSAGE =~ /\[cicd\]/ || $RUN_PIPELINE
+  when: on_failure
+
+build_staging:update_manifest:
+  stage: update_manifest_staging
+  needs: ["build_staging:build_image"]
+  tags:
+    - dcna-app-builder
+  image: jok3rbrvt/go-build:1.18.5-alpine3.15
+  before_script:
+    - git config --global user.name "cicd-user"
+    - git config --global user.email "sns_tos@vng.com.vn"
+    - git clone https://${USER_CI}:${PASS_USER_CI}@${CI_SERVER_HOST}/dcna/${REPO_MANIFEST}.git
+  script:
+    - cd ${REPO_MANIFEST}
+    - cd kube/${CI_PROJECT_NAME}/stg
+    - kustomize edit set image ${BUILD_IMAGE}
+    - cat kustomization.yaml
+    - git commit -am "Update image from cicd-user"
+    - git push origin master
+  only:
+    refs:
+      - dev
+    variables:
+      - $CI_COMMIT_MESSAGE =~ /^\[cicd\]/ || $RUN_PIPELINE
+
+alert_deploy_stag:success:
+  stage: alert_deploy
+  image: nyurik/alpine-python3-requests
+  needs: ["build_staging:build_image", "build_staging:update_manifest"]
+  tags:
+    - dcna-app-builder
+  script:
+    - python3 devops/noti_success.py
+  only:
+    refs:
+    - dev
+    variables:
+    - $CI_COMMIT_MESSAGE =~ /\[cicd\]/ || $RUN_PIPELINE
+  when: on_success
+
+alert_deploy_stag:failure:
+  stage: alert_deploy
+  needs: ["build_staging:build_image", "build_staging:update_manifest"]
+  image: nyurik/alpine-python3-requests
+  tags:
+    - dcna-app-builder
+  script:
+    - python3 devops/noti_failed.py
+  only:
+    refs:
+    - dev
+    variables:
+    - $CI_COMMIT_MESSAGE =~ /\[cicd\]/ || $RUN_PIPELINE
+  when: on_failure
