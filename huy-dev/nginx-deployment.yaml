@@ -9,11 +9,11 @@ spec:
   # replica ở đây sẽ tạo ra 2 pods luôn luôn chạy, khi một số pods bị down hay chết hay bất kì lý do nào đó sẽ tự động tạo lại số lượng pods bằng 2
   selector:
     matchLabels:
-      app: nginx-deployment
+      run: nginx-deployment
   template:
     metadata:
       labels:
-        app: nginx-deployment
+        run: nginx-deployment
     spec:
       containers:
       - name: nginx-deployment
